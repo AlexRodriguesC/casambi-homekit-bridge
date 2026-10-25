@@ -1,0 +1,2 @@
+casambi-bt==0.3.2
+HAP-python[QRCode]==5.0.0

@@ -1,0 +1,16 @@
+[Unit]
+Description=Casambi to HomeKit bridge
+After=network-online.target bluetooth.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=/home/__USER__/casambi-homekit-bridge
+EnvironmentFile=/etc/casambi-homekit.env
+ExecStart=/home/__USER__/casambi-homekit-bridge/venv/bin/python homekit_bridge.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
