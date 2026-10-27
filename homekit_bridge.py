@@ -68,6 +68,8 @@ class CasambiLink:
         await self.casa.connect(device, self.password)
 
     async def ensure_connected(self):
+        from CasambiBt import Casambi
+
         async with self._lock:
             if self.casa.connected:
                 return
@@ -76,6 +78,9 @@ class CasambiLink:
                 await self.casa.disconnect()
             except Exception:
                 pass
+            # disconnect() closes the Casambi object's HTTP client for good, so a
+            # reused instance fails every login. Start each attempt from a fresh one.
+            self.casa = Casambi()
             await self._connect()
             log.info("Connected.")
 
