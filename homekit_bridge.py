@@ -25,7 +25,7 @@ STATE_FILE = str(Path(__file__).with_name("accessory.state"))
 RESET_DELAY = 1.5
 WATCHDOG_INTERVAL = 15
 DISCONNECT_TIMEOUT = 10
-CONNECT_TIMEOUT = 60
+CONNECT_TIMEOUT = 10
 FIRST_SCENE_AID = 10
 
 
@@ -67,7 +67,13 @@ class CasambiLink:
         device = next((d for d in devices if d.address.upper() == self.address), None)
         if device is None:
             raise ConnectionError(f"Casambi device {self.address} not found over Bluetooth")
-        await self.casa.connect(device, self.password)
+        # The scan above takes about 5s on its own, so time only the connect.
+        # If the link drops during key exchange, CasambiBt waits forever for a
+        # reply. Give up so the watchdog can retry and scene taps aren't stuck.
+        try:
+            await asyncio.wait_for(self.casa.connect(device, self.password), CONNECT_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise ConnectionError(f"Connecting took longer than {CONNECT_TIMEOUT}s") from None
 
     async def ensure_connected(self):
         from CasambiBt import Casambi
@@ -83,12 +89,7 @@ class CasambiLink:
             # disconnect() closes the Casambi object's HTTP client for good, so a
             # reused instance fails every login. Start each attempt from a fresh one.
             self.casa = Casambi()
-            # If the link drops during key exchange, CasambiBt waits forever for a
-            # reply. Give up so the watchdog can retry and scene taps aren't stuck.
-            try:
-                await asyncio.wait_for(self._connect(), CONNECT_TIMEOUT)
-            except asyncio.TimeoutError:
-                raise ConnectionError(f"Connecting took longer than {CONNECT_TIMEOUT}s") from None
+            await self._connect()
             log.info("Connected.")
 
     async def switchToScene(self, scene):
