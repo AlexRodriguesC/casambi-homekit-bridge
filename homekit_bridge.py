@@ -24,6 +24,8 @@ CONFIG_FILE = Path(__file__).with_name("bridge_config.json")
 STATE_FILE = str(Path(__file__).with_name("accessory.state"))
 RESET_DELAY = 1.5
 WATCHDOG_INTERVAL = 15
+DISCONNECT_TIMEOUT = 10
+CONNECT_TIMEOUT = 10
 FIRST_SCENE_AID = 10
 
 
@@ -65,7 +67,13 @@ class CasambiLink:
         device = next((d for d in devices if d.address.upper() == self.address), None)
         if device is None:
             raise ConnectionError(f"Casambi device {self.address} not found over Bluetooth")
-        await self.casa.connect(device, self.password)
+        # The scan above takes about 5s on its own, so time only the connect.
+        # If the link drops during key exchange, CasambiBt waits forever for a
+        # reply. Give up so the watchdog can retry and scene taps aren't stuck.
+        try:
+            await asyncio.wait_for(self.casa.connect(device, self.password), CONNECT_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise ConnectionError(f"Connecting took longer than {CONNECT_TIMEOUT}s") from None
 
     async def ensure_connected(self):
         from CasambiBt import Casambi
@@ -87,6 +95,12 @@ class CasambiLink:
     async def switchToScene(self, scene):
         await self.ensure_connected()
         await self.casa.switchToScene(scene)
+
+    async def close(self):
+        try:
+            await asyncio.wait_for(self.casa.disconnect(), DISCONNECT_TIMEOUT)
+        except Exception as err:
+            log.warning("Could not disconnect cleanly: %s", err)
 
     async def watchdog(self):
         while True:
@@ -219,10 +233,28 @@ def main():
         bridge.add_accessory(SceneSwitch(driver, scene, network))
     driver.add_accessory(accessory=bridge)
 
-    if link:
-        loop.create_task(link.watchdog())
-    signal.signal(signal.SIGINT, driver.signal_handler)
-    signal.signal(signal.SIGTERM, driver.signal_handler)
+    watchdog = loop.create_task(link.watchdog()) if link else None
+
+    # driver.signal_handler never stops a loop we passed in, so the process
+    # would hang on SIGTERM until systemd killed it. Stop everything ourselves.
+    async def shutdown():
+        try:
+            if watchdog:
+                watchdog.cancel()
+            await driver.async_stop()
+            if link:
+                await link.close()
+        except Exception:
+            log.exception("Error while shutting down")
+        finally:
+            loop.stop()
+
+    def on_signal(_signal, _frame):
+        log.info("Shutting down...")
+        loop.call_soon_threadsafe(loop.create_task, shutdown())
+
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
 
     pin = driver.state.pincode.decode()
     log.info("%d scenes exposed. Pair in the Home app with code %s", len(network.scenes), pin)
