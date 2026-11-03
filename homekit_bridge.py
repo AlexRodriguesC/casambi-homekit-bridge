@@ -26,6 +26,7 @@ RESET_DELAY = 1.5
 WATCHDOG_INTERVAL = 15
 DISCONNECT_TIMEOUT = 10
 CONNECT_TIMEOUT = 10
+MAX_RECONNECT_FAILURES = 10
 FIRST_SCENE_AID = 10
 
 
@@ -102,12 +103,21 @@ class CasambiLink:
         except Exception as err:
             log.warning("Could not disconnect cleanly: %s", err)
 
-    async def watchdog(self):
+    async def watchdog(self, give_up):
+        failures = 0
         while True:
             await asyncio.sleep(WATCHDOG_INTERVAL)
             try:
                 await self.ensure_connected()
+                failures = 0
             except Exception as err:
+                failures += 1
+                if failures >= MAX_RECONNECT_FAILURES:
+                    # Once the process's link to BlueZ breaks (bleak raises EOFError),
+                    # no retry from inside it succeeds. Exit so systemd starts afresh.
+                    log.error("Reconnect failed %d times in a row, exiting: %s", failures, err)
+                    give_up()
+                    return
                 log.warning("Reconnect failed, will retry: %s", err)
 
 
@@ -233,7 +243,8 @@ def main():
         bridge.add_accessory(SceneSwitch(driver, scene, network))
     driver.add_accessory(accessory=bridge)
 
-    watchdog = loop.create_task(link.watchdog()) if link else None
+    exit_code = 0
+    watchdog = None
 
     # driver.signal_handler never stops a loop we passed in, so the process
     # would hang on SIGTERM until systemd killed it. Stop everything ourselves.
@@ -253,13 +264,22 @@ def main():
         log.info("Shutting down...")
         loop.call_soon_threadsafe(loop.create_task, shutdown())
 
+    def give_up():
+        nonlocal exit_code
+        exit_code = 1
+        loop.create_task(shutdown())
+
+    if link:
+        watchdog = loop.create_task(link.watchdog(give_up))
+
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
 
     pin = driver.state.pincode.decode()
     log.info("%d scenes exposed. Pair in the Home app with code %s", len(network.scenes), pin)
     driver.start()
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
